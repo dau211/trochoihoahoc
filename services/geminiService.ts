@@ -6,7 +6,7 @@ export const generateQuestions = async (topic: string, mode: GameMode): Promise<
     throw new Error("API Key is missing.");
   }
 
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
   let promptContext = "";
   let questionCount = 15;
