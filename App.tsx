@@ -48,12 +48,32 @@ const App: React.FC = () => {
     return () => window.removeEventListener('click', handleInteraction);
   }, []);
 
+  // GAME RESET / INIT QUESTION LOGIC
+  useEffect(() => {
+      if (gameState === 'PLAYING' && !modalMessage && !isAnswerChecked) {
+          const q = questions[currentQIndex];
+          if (!q) return;
+
+          // Millionaire mode: Reset timer for each question
+          if (gameMode === 'MILLIONAIRE') {
+             setTimeLeft(MILLIONAIRE_DURATION);
+             // No voice reading anymore, just start immediately
+          } 
+          // Olympia: Global timer handled in startGame/timer effect
+      }
+      return () => {
+          audioService.cancelSpeech();
+          audioService.stopSuspense();
+      };
+  }, [currentQIndex, gameState, gameMode, questions, modalMessage, isAnswerChecked]);
+
   // Timer Countdown Logic
   useEffect(() => {
     if (gameState === 'PLAYING' && !modalMessage) {
-      if (gameMode === 'MILLIONAIRE' && isAnswerChecked) {
-          // Pause timer when showing answer in Millionaire
-          return;
+      
+      // Stop timer if answered
+      if (gameMode === 'MILLIONAIRE') {
+          if (isAnswerChecked) return;
       }
 
       timerRef.current = setInterval(() => {
@@ -63,8 +83,13 @@ const App: React.FC = () => {
             return 0;
           }
           
-          if (gameMode === 'MILLIONAIRE' && prev <= 10) audioService.playTick();
-          if (gameMode === 'OLYMPIA' && prev % 2 === 0) audioService.playTick(); // Tick less frequent but steady
+          // Audio Logic for Ticking
+          if (gameMode === 'MILLIONAIRE' && prev <= 30) {
+              audioService.playTick(); 
+          }
+          if (gameMode === 'OLYMPIA' && prev % 2 === 0) {
+              audioService.playTick(); 
+          }
 
           return prev - 1;
         });
@@ -104,9 +129,8 @@ const App: React.FC = () => {
       
       // Init based on mode
       if (mode === 'MILLIONAIRE') {
-          resetMillionaireQuestion();
           setLifelines({ fiftyFifty: true, phoneFriend: true, askAudience: true });
-          setTimeLeft(MILLIONAIRE_DURATION);
+          resetMillionaireQuestion(); 
       } else {
           // Olympia
           setOlympiaScore(0);
@@ -114,9 +138,13 @@ const App: React.FC = () => {
           setTimeLeft(OLYMPIA_DURATION);
       }
 
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      setErrorMsg("Không thể tạo câu hỏi. Vui lòng thử lại.");
+      if (err.message?.includes("429") || err.message?.includes("RESOURCE_EXHAUSTED")) {
+         setErrorMsg("Hệ thống AI đang quá tải (Lỗi 429). Vui lòng đợi 30 giây rồi thử lại!");
+      } else {
+         setErrorMsg("Không thể tạo câu hỏi. Vui lòng kiểm tra kết nối mạng hoặc thử lại sau.");
+      }
       setGameState('SETUP');
     }
   };
@@ -127,7 +155,6 @@ const App: React.FC = () => {
     setIsCorrect(false);
     setHiddenAnswers([]);
     setModalMessage(null);
-    setTimeLeft(MILLIONAIRE_DURATION); 
   };
 
   const resetOlympiaQuestion = () => {
@@ -142,12 +169,12 @@ const App: React.FC = () => {
     if (gameState !== 'PLAYING') return;
     if (gameMode === 'MILLIONAIRE' && (isAnswerChecked || hiddenAnswers.includes(index))) return;
     if (gameMode === 'OLYMPIA' && isAnswerChecked) return;
-
+    
     audioService.playSelect();
     setSelectedAns(index);
 
     if (gameMode === 'MILLIONAIRE') {
-        // Suspense
+        // Suspense delay
         setTimeout(() => checkAnswer(index), 2000);
     } else {
         // Olympia: Instant check
@@ -186,7 +213,10 @@ const App: React.FC = () => {
     } else {
       audioService.playWrong();
       if (gameMode === 'MILLIONAIRE') {
-          setTimeout(() => setGameState('GAME_OVER'), 2000);
+          setTimeout(() => {
+             // MC Reads explanation before Game Over (Optional, for now just text)
+             setGameState('GAME_OVER');
+          }, 1500);
       } else {
           // Olympia just moves on
           setTimeout(() => nextOlympiaQuestion(), 800);
@@ -199,8 +229,6 @@ const App: React.FC = () => {
           setCurrentQIndex(prev => prev + 1);
           resetOlympiaQuestion();
       } else {
-          // Out of questions but maybe time left? End early or cycle?
-          // Let's end for simplicity
           setGameState('OLYMPIA_SUMMARY');
           audioService.playWin();
       }
@@ -212,7 +240,7 @@ const App: React.FC = () => {
       nextOlympiaQuestion();
   };
 
-  // --- Millionaire Lifelines Logic (Unchanged) ---
+  // --- Millionaire Lifelines Logic ---
   const useFiftyFifty = () => {
     if (!lifelines.fiftyFifty) return;
     audioService.playSelect();
@@ -226,6 +254,7 @@ const App: React.FC = () => {
 
   const usePhoneFriend = () => {
     if (!lifelines.phoneFriend) return;
+    
     audioService.playSelect();
     const q = questions[currentQIndex];
     const difficulty = currentQIndex < 5 ? 0.9 : currentQIndex < 10 ? 0.7 : 0.4;
@@ -236,10 +265,16 @@ const App: React.FC = () => {
         suggestedIndex = wrongs[Math.floor(Math.random() * wrongs.length)];
     }
     const answerChar = String.fromCharCode(65 + suggestedIndex);
+    const content = `Tôi nghĩ đáp án đúng là phương án ${answerChar}. ${q.answers[suggestedIndex]}. Chắc chắn đấy!`;
+    
     setModalMessage({
         title: "GỌI ĐIỆN NGƯỜI THÂN",
-        content: `Tôi nghĩ đáp án đúng là ${answerChar}. ${q.answers[suggestedIndex]}. Chắc chắn đấy!`
+        content: content
     });
+    
+    // Disabled voice for advice as well
+    // audioService.speakMixed(content);
+
     setLifelines(prev => ({ ...prev, phoneFriend: false }));
   };
 
@@ -288,6 +323,70 @@ const App: React.FC = () => {
 
   const getCurrentLevelMoney = () => MONEY_TREE[currentQIndex].amount;
 
+  // --- FORMATTING HELPERS ---
+  const formatChemicalText = (text: string): React.ReactNode => {
+    if (!text) return "";
+    
+    // Split text into potential chemical words and normal text
+    // We split by space but keep delimiters to reconstruct
+    const parts = text.split(/(\s+|[,.;:!?])/g);
+    
+    return parts.map((part, idx) => {
+        // Skip pure whitespace/punctuation
+        if (/^[\s,.;:!?]+$/.test(part)) return <span key={idx}>{part}</span>;
+        
+        const word = part;
+
+        // Detection Heuristic:
+        // 1. Must contain at least one Uppercase letter [A-Z].
+        // 2. AND (Contains a Digit OR Contains + or - at the end).
+        // 3. OR it is exactly a 2-letter element symbol like "Fe", "Cu".
+        
+        const isChemical = 
+            (/[A-Z]/.test(word) && (/[\d]/.test(word) || /[+-]$/.test(word))) || 
+            (/^[A-Z][a-z]?$/.test(word)); // Standard symbols like O, N, Fe
+            
+        if (!isChemical) {
+            return <span key={idx}>{word}</span>;
+        }
+
+        // --- CHEMICAL PARSING LOGIC ---
+        
+        // 1. Extract Ionic Charge (Superscript) if it exists at the VERY END.
+        // Look for pattern: Digit(optional) + Sign (+ or -) at the end. 
+        // Example: "Fe3+", "SO42-", "Cl-", "Na+"
+        let charge = "";
+        let body = word;
+        
+        const chargeMatch = word.match(/(\d*[+-])$/);
+        if (chargeMatch) {
+            // Be careful not to match simple oxidation states inside brackets if logic fails, 
+            // but for standard formulas this works.
+            charge = chargeMatch[0];
+            body = word.substring(0, word.length - charge.length);
+        }
+
+        // 2. Format the body: Digits become Subscripts.
+        // We split by digits to isolate them.
+        const bodyParts = body.split(/(\d+)/);
+
+        return (
+            <span key={idx} className="inline-block whitespace-nowrap">
+                {bodyParts.map((p, i) => {
+                    // If p is a number, it is a subscript (e.g., 2 in H2O)
+                    // UNLESS it is a coefficient at the start? No, typically H2O, numbers are subs.
+                    // Coefficients usually separate by space "2 H2O".
+                    if (/^\d+$/.test(p)) {
+                        return <sub key={i} className="text-[75%] align-sub">{p}</sub>;
+                    }
+                    return <span key={i}>{p}</span>;
+                })}
+                {charge && <sup className="text-[75%] align-super font-bold">{charge}</sup>}
+            </span>
+        );
+    });
+  };
+
   // --- RENDER HELPERS ---
   const renderTVHexagon = (text: string, label: string | null, onClick: () => void, state: 'normal' | 'selected' | 'correct' | 'wrong', disabled: boolean, hidden: boolean, isQuestion: boolean = false) => {
     if (hidden) return <div className="h-full w-full opacity-0"></div>;
@@ -297,11 +396,6 @@ const App: React.FC = () => {
     if (state === 'correct') innerClass += " correct";
     if (state === 'wrong') innerClass += " wrong";
 
-    // Olympia Style Overrides
-    if (gameMode === 'OLYMPIA') {
-        // More subtle gradients for Olympia
-    }
-
     let labelColor = "text-orange-400";
     if (state === 'selected') labelColor = "text-black";
     if (state === 'correct' || state === 'wrong') labelColor = "text-white";
@@ -309,14 +403,12 @@ const App: React.FC = () => {
     let textColor = "text-white";
     if (state === 'selected') textColor = "text-black";
 
-    // Dynamic Font Sizing Logic
-    let fontClass = "text-sm md:text-lg"; // Default
+    let fontClass = "text-sm md:text-lg"; 
     if (isQuestion) {
         if (text.length > 150) fontClass = "text-sm md:text-base leading-tight";
         else if (text.length > 100) fontClass = "text-base md:text-lg leading-snug";
         else fontClass = "text-lg md:text-2xl leading-normal";
     } else {
-        // Answers
         if (text.length > 60) fontClass = "text-[10px] md:text-xs leading-tight";
         else if (text.length > 35) fontClass = "text-xs md:text-sm leading-tight";
         else fontClass = "text-sm md:text-lg leading-normal";
@@ -335,7 +427,7 @@ const App: React.FC = () => {
                             <span className={`font-bold text-xl md:text-2xl mr-3 flex-shrink-0 ${labelColor}`}>{label}:</span>
                         )}
                         <span className={`font-medium ${isQuestion ? 'text-center' : 'text-left'} w-full ${textColor} ${fontClass} break-words`}>
-                            {text}
+                            {formatChemicalText(text)}
                         </span>
                     </div>
                 </div>
@@ -345,8 +437,6 @@ const App: React.FC = () => {
   };
 
   // --- SCREENS ---
-
-  // 1. MENU SCREEN
   if (gameState === 'MENU') {
       return (
         <div className="min-h-screen flex flex-col items-center justify-center p-4 bg-studio-gradient relative overflow-hidden">
@@ -358,7 +448,6 @@ const App: React.FC = () => {
             </h1>
 
             <div className="flex flex-col md:flex-row gap-8 relative z-10 w-full max-w-4xl">
-                {/* Millionaire Option */}
                 <div onClick={() => setGameState('SETUP')} className="flex-1 group cursor-pointer">
                     <div className="bg-blue-900/40 backdrop-blur-md border border-blue-500/50 p-8 rounded-2xl h-full transform transition-all duration-300 group-hover:scale-105 group-hover:bg-blue-800/60 shadow-2xl flex flex-col items-center text-center">
                         <div className="w-24 h-24 rounded-full bg-gradient-to-br from-blue-600 to-black border-4 border-orange-500 mb-4 flex items-center justify-center shadow-[0_0_20px_rgba(234,88,12,0.5)]">
@@ -369,7 +458,6 @@ const App: React.FC = () => {
                     </div>
                 </div>
 
-                {/* Olympia Option */}
                 <div onClick={() => { setGameMode('OLYMPIA'); setGameState('SETUP'); }} className="flex-1 group cursor-pointer">
                     <div className="bg-blue-900/40 backdrop-blur-md border border-blue-500/50 p-8 rounded-2xl h-full transform transition-all duration-300 group-hover:scale-105 group-hover:bg-blue-800/60 shadow-2xl flex flex-col items-center text-center">
                         <div className="w-24 h-24 rounded-full bg-gradient-to-br from-cyan-500 to-blue-900 border-4 border-white mb-4 flex items-center justify-center shadow-[0_0_20px_rgba(255,255,255,0.5)]">
@@ -384,7 +472,6 @@ const App: React.FC = () => {
       );
   }
 
-  // 2. SETUP SCREEN (Shared)
   if (gameState === 'SETUP') {
     const isOlympia = gameMode === 'OLYMPIA';
     return (
@@ -427,7 +514,6 @@ const App: React.FC = () => {
     );
   }
 
-  // 3. LOADING SCREEN (Shared)
   if (gameState === 'LOADING') {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-studio-gradient">
@@ -440,7 +526,6 @@ const App: React.FC = () => {
     );
   }
 
-  // 4. GAME OVER / VICTORY / SUMMARY
   if (gameState === 'GAME_OVER' || gameState === 'VICTORY' || gameState === 'OLYMPIA_SUMMARY') {
     const isOlympia = gameMode === 'OLYMPIA';
     return (
@@ -469,8 +554,10 @@ const App: React.FC = () => {
             {!isOlympia && (questions[currentQIndex]?.explanation || gameState === 'GAME_OVER') && (
                 <div className="bg-gray-900/90 p-6 rounded-lg mb-8 text-left border-l-4 border-orange-500 shadow-xl">
                     <p className="text-orange-400 font-bold mb-2 text-lg uppercase">Đáp án & Giải thích:</p>
-                    <p className="text-white text-lg">Đáp án đúng: <span className="font-bold text-green-400">{questions[currentQIndex].answers[questions[currentQIndex].correctIndex]}</span></p>
-                    <p className="text-gray-300 mt-2 italic">{questions[currentQIndex].explanation}</p>
+                    <p className="text-white text-lg">
+                        Đáp án đúng: <span className="font-bold text-green-400">{formatChemicalText(questions[currentQIndex].answers[questions[currentQIndex].correctIndex])}</span>
+                    </p>
+                    <p className="text-gray-300 mt-2 italic">{formatChemicalText(questions[currentQIndex].explanation || "")}</p>
                 </div>
             )}
 
@@ -495,18 +582,14 @@ const App: React.FC = () => {
 
   const currentQ = questions[currentQIndex];
 
-  // 5. PLAYING SCREEN
   return (
     <div className="h-screen w-full flex overflow-hidden relative font-roboto bg-black">
-      {/* Backdrops */}
       <div className="absolute inset-0 pointer-events-none z-0 bg-studio-gradient"></div>
       <div className="studio-rays z-0 opacity-40"></div>
       <div className="studio-grid z-0 opacity-20"></div>
 
-      {/* Main Game Area */}
       <div className="flex-1 flex flex-col h-full relative z-10">
         
-        {/* TOP INFO BAR */}
         <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-40 bg-black/60 border-2 border-blue-500/50 rounded-full px-8 py-2 shadow-lg backdrop-blur-md flex gap-8 items-center">
              {gameMode === 'MILLIONAIRE' ? (
                  <>
@@ -521,7 +604,6 @@ const App: React.FC = () => {
              )}
         </div>
 
-        {/* Mobile Top Toggle (Millionaire Only) */}
         {gameMode === 'MILLIONAIRE' && (
             <div className="md:hidden flex justify-between items-center p-4 absolute top-0 left-0 right-0 z-50">
                 <div className="w-10"></div>
@@ -531,21 +613,19 @@ const App: React.FC = () => {
             </div>
         )}
 
-        {/* CENTER VISUAL (Timer & Logo) */}
         <div className="flex-1 flex flex-col items-center justify-center relative min-h-0">
              <div className={`absolute w-[400px] h-[400px] ${gameMode === 'OLYMPIA' ? 'bg-cyan-500/20' : 'bg-blue-500/20'} rounded-full blur-[60px] pointer-events-none`}></div>
              
              <div className={`w-48 h-48 md:w-64 md:h-64 rounded-full border-4 ${gameMode === 'OLYMPIA' ? 'border-cyan-400/30' : 'border-blue-400/30'} flex items-center justify-center bg-radial-gradient from-blue-900 to-black shadow-2xl z-10 relative overflow-hidden`}>
                  
-                 {/* Timer Progress */}
                  {(!isAnswerChecked || gameMode === 'OLYMPIA') && (
                    <svg className="absolute inset-0 w-full h-full -rotate-90 p-2" viewBox="0 0 100 100">
                       <circle cx="50" cy="50" r="45" fill="none" stroke="#1e3a8a" strokeWidth="4" />
                       <circle 
                         cx="50" cy="50" r="45" fill="none" stroke={timeLeft < 10 ? "#ef4444" : (gameMode === 'OLYMPIA' ? '#22d3ee' : "#eab308")} strokeWidth="4"
                         strokeDasharray="283"
-                        strokeDashoffset={283 - (283 * timeLeft) / (gameMode === 'OLYMPIA' ? OLYMPIA_DURATION : MILLIONAIRE_DURATION)}
-                        className="transition-all duration-1000 ease-linear"
+                        strokeDashoffset={283 - (283 * (gameMode === 'MILLIONAIRE' ? timeLeft : timeLeft)) / (gameMode === 'OLYMPIA' ? OLYMPIA_DURATION : MILLIONAIRE_DURATION)}
+                        className={`transition-all duration-1000 ease-linear opacity-100`}
                       />
                    </svg>
                  )}
@@ -557,7 +637,6 @@ const App: React.FC = () => {
                         </div>
                     ) : (
                         <>
-                             {/* Timer Display */}
                              <h1 className={`text-2xl md:text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-b ${gameMode === 'OLYMPIA' ? 'from-cyan-200 to-blue-500' : 'from-orange-300 to-orange-600'} uppercase tracking-tighter leading-none drop-shadow-lg mb-2`}>
                                  {gameMode === 'OLYMPIA' ? 'KHỞI ĐỘNG' : 'TRIỆU PHÚ'}
                              </h1>
@@ -569,7 +648,6 @@ const App: React.FC = () => {
                  </div>
              </div>
              
-             {/* Olympia Skip Button */}
              {gameMode === 'OLYMPIA' && (
                  <button 
                     onClick={skipQuestionOlympia}
@@ -581,10 +659,8 @@ const App: React.FC = () => {
              )}
         </div>
 
-        {/* BOTTOM GAME CONTROLS */}
         <div className="w-full pb-2 md:pb-6 px-2 md:px-8 flex flex-col items-center relative">
             
-            {/* Lifelines (Millionaire Only) */}
             {gameMode === 'MILLIONAIRE' && (
                 <Lifelines 
                     lifelines={lifelines} 
@@ -597,15 +673,12 @@ const App: React.FC = () => {
                 />
             )}
 
-            {/* Decoration Lines */}
             <div className="absolute top-[80px] left-0 w-full h-[2px] bg-blue-500/30 hidden md:block shadow-[0_0_10px_rgba(59,130,246,0.5)]"></div>
 
-            {/* Question Section */}
             <div className="w-full max-w-5xl mb-1 relative z-10">
                  <div className="h-20 md:h-28 w-full">
                     {renderTVHexagon(currentQ.question, null, () => {}, 'normal', false, false, true)}
                  </div>
-                 {/* Connector Lines */}
                  <div className="absolute left-0 right-0 -bottom-4 h-8 flex justify-between px-[20%] pointer-events-none">
                      <div className="w-[2px] h-full bg-[#aebcc9]"></div>
                      <div className="w-[2px] h-full bg-[#aebcc9]"></div>
@@ -615,7 +688,6 @@ const App: React.FC = () => {
 
             <div className="h-4 w-full"></div>
 
-            {/* Answers Grid */}
             <div className="w-full max-w-5xl grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-2 relative z-10">
                 {currentQ.answers.map((ans, idx) => {
                     const isHidden = gameMode === 'MILLIONAIRE' && hiddenAnswers.includes(idx);
@@ -645,14 +717,12 @@ const App: React.FC = () => {
         </div>
       </div>
 
-      {/* Right Sidebar - Money Tree (Millionaire Only) */}
       {gameMode === 'MILLIONAIRE' && (
           <div className="hidden lg:block h-full relative z-20 border-l border-blue-800/20 bg-black/20 backdrop-blur-sm">
              <MoneyLadder currentQuestionIndex={currentQIndex} />
           </div>
       )}
 
-      {/* Mobile Money Tree Overlay */}
       {showMoneyLadderMobile && gameMode === 'MILLIONAIRE' && (
         <div className="fixed inset-0 z-40 bg-black/90 flex flex-col items-center justify-center p-8 md:hidden" onClick={() => setShowMoneyLadderMobile(false)}>
             <div className="h-[80vh] w-full" onClick={e => e.stopPropagation()}>
@@ -662,7 +732,6 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* Modal/Overlay */}
       {modalMessage && (
             <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={() => setModalMessage(null)}>
                 <div className="bg-blue-900 border-2 border-orange-500 p-0 rounded-xl max-w-md w-full shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
@@ -670,7 +739,7 @@ const App: React.FC = () => {
                         <h3 className="text-xl font-bold text-white uppercase tracking-widest">{modalMessage.title}</h3>
                     </div>
                     <div className="p-6 text-center">
-                         <p className="text-white font-medium text-lg leading-relaxed whitespace-pre-wrap">{modalMessage.content}</p>
+                         <p className="text-white font-medium text-lg leading-relaxed whitespace-pre-wrap">{formatChemicalText(modalMessage.content)}</p>
                     </div>
                     <div className="p-4 bg-black/20 flex justify-center">
                         <button onClick={() => setModalMessage(null)} className="px-8 py-2 bg-blue-700 hover:bg-blue-600 text-white rounded font-bold uppercase text-sm tracking-wider">Đã hiểu</button>

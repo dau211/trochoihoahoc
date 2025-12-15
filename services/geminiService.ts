@@ -1,12 +1,18 @@
+
 import { GoogleGenAI, Type } from "@google/genai";
 import { Question, GameMode } from "../types";
+
+const MAX_RETRIES = 3;
+const INITIAL_BACKOFF = 2000; // 2 seconds
+
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 export const generateQuestions = async (topic: string, mode: GameMode): Promise<Question[]> => {
   if (!process.env.API_KEY) {
     throw new Error("API Key is missing.");
   }
 
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
   let promptContext = "";
   let questionCount = 15;
@@ -34,67 +40,92 @@ export const generateQuestions = async (topic: string, mode: GameMode): Promise<
   const prompt = `
     Bạn là hệ thống hỗ trợ Hóa học dành cho học sinh THPT Việt Nam, bám sát Chương trình Giáo dục Phổ thông 2018.
     Nhiệm vụ: Tạo bộ câu hỏi trắc nghiệm về chủ đề: "${topic}".
-    (Lưu ý: Nếu chủ đề chứa tên chất tiếng Việt, hãy tự động chuyển đổi và sử dụng tên tiếng Anh chuẩn IUPAC trong nội dung câu hỏi).
 
-    QUY TẮC NGHIÊM NGẶT VỀ NGÔN NGỮ:
-    – Chỉ tên các chất hóa học được viết bằng tiếng Anh theo chuẩn quốc tế (IUPAC hoặc tên thông dụng quốc tế).
-    – Tất cả phần khác (giải thích, mô tả, điều kiện, hiện tượng, nhận xét…) phải viết bằng tiếng Việt.
-    – Khi người dùng nhập tên chất bằng tiếng Việt, phải tự động chuyển sang tiếng Anh.
-    – Tuyệt đối không sử dụng tên chất bằng tiếng Việt trong bất kỳ hoàn cảnh nào.
+    QUY TẮC NGHIÊM NGẶT VỀ DANH PHÁP HÓA HỌC (BẮT BUỘC):
+    1. Tên chất: PHẢI dùng tiếng Anh chuẩn IUPAC (ví dụ: Sodium chloride, Sulfuric acid). KHÔNG dùng tên tiếng Việt (như Natri clorua).
+    2. Công thức hóa học:
+       - Viết liền, chuẩn xác (ví dụ: H2SO4, C2H5OH).
+       - Ion: Viết liền kèm điện tích (ví dụ: Fe3+, Cu2+, SO4 2-, NO3-). KHÔNG dùng ký hiệu lạ.
+       - Isotopes (Đồng vị): Viết số khối trước (ví dụ: 12C, 14C) hoặc dùng tên (Carbon-14).
+    3. Ngôn ngữ còn lại: Tiếng Việt.
+
+    QUY TẮC PHÂN TÍCH HIỂN THỊ (Frontend Parser Rules):
+    - Hệ thống sẽ tự động chuyển các số trong công thức (ví dụ H2O) thành chỉ số dưới (subscript).
+    - Hệ thống sẽ tự động chuyển điện tích ion (ví dụ 3+, 2-) thành chỉ số trên (superscript) nếu chúng nằm ở cuối công thức.
+    => VÌ VẬY: Hãy viết công thức hóa học ở dạng văn bản thuần túy chuẩn xác nhất. Ví dụ: Viết "Fe2(SO4)3" thay vì cố gắng format.
 
     PHẠM VI KIẾN THỨC:
     – Chỉ sử dụng kiến thức Hóa học THPT lớp 10, 11, 12 thuộc CTGD 2018 và các bộ sách: Cánh Diều, Kết Nối Tri Thức, Chân Trời Sáng Tạo.
     – Không sử dụng kiến thức cũ đã bị loại bỏ trong chương trình 2018 (khái niệm cũ, đơn vị cũ, phương pháp cũ…).
-    – Không sử dụng nội dung vượt trình độ THPT: cơ chế hữu cơ sâu, hóa lượng tử, phổ IR/NMR, phản ứng bậc cao phức tạp…
-
-    QUY TẮC XỬ LÝ PHẢN ỨNG HÓA HỌC:
-    1. Khi viết phương trình, phải dùng công thức hóa học chuẩn và tên chất tiếng Anh.
-    2. Phải nêu đúng điều kiện phản ứng theo chương trình THPT 2018 (nhiệt độ, xúc tác, môi trường…).
-    3. Phải bảo toàn nguyên tố, hệ số và đảm bảo phản ứng phù hợp với mức THPT.
 
     ${promptContext}
 
     Định dạng đầu ra: JSON Array gồm ${questionCount} object câu hỏi.
   `;
 
-  try {
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              question: { type: Type.STRING, description: "Nội dung câu hỏi bằng Tiếng Việt (tên chất tiếng Anh)" },
-              answers: { 
-                type: Type.ARRAY, 
-                items: { type: Type.STRING },
-                description: "Danh sách 4 đáp án (tên chất tiếng Anh)"
-              },
-              correctIndex: { 
-                type: Type.INTEGER, 
-                description: "Chỉ số của đáp án đúng (0-3)" 
-              },
-              explanation: { type: Type.STRING, description: "Giải thích ngắn gọn bằng Tiếng Việt (tên chất tiếng Anh)" }
-            },
-            required: ["question", "answers", "correctIndex"]
+  const config = {
+    responseMimeType: "application/json",
+    responseSchema: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          question: { type: Type.STRING, description: "Nội dung câu hỏi bằng Tiếng Việt (tên chất tiếng Anh/Công thức chuẩn)" },
+          answers: { 
+            type: Type.ARRAY, 
+            items: { type: Type.STRING },
+            description: "Danh sách 4 đáp án (tên chất tiếng Anh/Công thức chuẩn)"
+          },
+          correctIndex: { 
+            type: Type.INTEGER, 
+            description: "Chỉ số của đáp án đúng (0-3)" 
+          },
+          explanation: { 
+            type: Type.STRING, 
+            description: "Lời giải thích ngắn gọn, đi thẳng vào kiến thức khoa học, giải thích tại sao đáp án đó là đúng hoặc sai. TUYỆT ĐỐI KHÔNG sử dụng các từ cảm thán như 'Chúc mừng', 'Xuất sắc', 'Rất tiếc', 'Hoan hô', 'Tuyệt vời'. Chỉ cung cấp thông tin Hóa học thuần túy." 
           }
-        }
-      }
-    });
-
-    if (response.text) {
-      const questions = JSON.parse(response.text) as Question[];
-      if (Array.isArray(questions) && questions.length > 0) {
-        return questions;
+        },
+        required: ["question", "answers", "correctIndex"]
       }
     }
-    throw new Error("Invalid response format from AI");
-  } catch (error) {
-    console.error("Error generating questions:", error);
-    throw error;
+  };
+
+  let attempts = 0;
+  while (attempts < MAX_RETRIES) {
+    try {
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: prompt,
+        config: config
+      });
+
+      if (response.text) {
+        const questions = JSON.parse(response.text) as Question[];
+        if (Array.isArray(questions) && questions.length > 0) {
+          return questions;
+        }
+      }
+      throw new Error("Invalid response format from AI");
+    } catch (error: any) {
+      // Handle Rate Limits (429) or Service Unavailable (503)
+      const isQuotaError = error.message?.includes("429") || 
+                           error.status === 429 || 
+                           error.code === 429 ||
+                           error.message?.includes("RESOURCE_EXHAUSTED");
+      
+      if (isQuotaError && attempts < MAX_RETRIES - 1) {
+        attempts++;
+        // Backoff: 2s, 4s, 8s
+        const waitTime = INITIAL_BACKOFF * Math.pow(2, attempts - 1);
+        console.warn(`Gemini API Quota Exceeded. Retrying in ${waitTime}ms... (Attempt ${attempts}/${MAX_RETRIES})`);
+        await delay(waitTime);
+        continue;
+      }
+      
+      console.error("Error generating questions:", error);
+      throw error;
+    }
   }
+  
+  throw new Error("Failed to generate questions after multiple retries due to rate limits.");
 };
